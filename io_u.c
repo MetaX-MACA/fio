@@ -2163,7 +2163,7 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 	struct fio_file *f = io_u->file;
 
 	dprint_io_u(io_u, "complete");
-
+    log_info("io_completed(): io_u->flags %u IO_U_F_FLIGHT %u io_u->flags & IO_U_F_FLIGHT %u\n", io_u->flags, IO_U_F_FLIGHT, io_u->flags & IO_U_F_FLIGHT);
 	assert(io_u->flags & IO_U_F_FLIGHT);
 	io_u_clear_inflight_flags(td, io_u);
 	invalidate_inflight(td, io_u);
@@ -2331,12 +2331,17 @@ static void ios_completed(struct thread_data *td,
 	int i;
 
 	for (i = 0; i < icd->nr; i++) {
+		dprint(FD_IO, "ios_completed(): before event() i %d\n", i);
 		io_u = td->io_ops->event(td, i);
 
+		dprint(FD_IO, "ios_completed(): before io_completed() i %d\n", i);
 		io_completed(td, &io_u, icd);
 
 		if (io_u)
+		{
+			dprint(FD_IO, "ios_completed(): before put_io_u() i %d\n", i);
 			put_io_u(td, io_u);
+		}
 	}
 }
 
@@ -2403,14 +2408,15 @@ int io_u_queued_complete(struct thread_data *td, int min_evts)
 		return ret;
 	} else if (!ret)
 		return ret;
-
+    dprint(FD_IO, "io_u_queued_complete(): before init_icd()\n");
 	init_icd(td, &icd, ret);
+	dprint(FD_IO, "io_u_queued_complete(): before ios_completed()\n");
 	ios_completed(td, &icd);
 	if (icd.error) {
 		td_verror(td, icd.error, "io_u_queued_complete");
 		return -1;
 	}
-
+    dprint(FD_IO, "io_u_queued_complete(): before io_u_update_bytes_done()\n");
 	io_u_update_bytes_done(td, &icd);
 
 	return ret;

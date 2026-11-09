@@ -129,6 +129,10 @@ endif
 ifdef SHARED_GPUACCEL_SOURCE
   SOURCE += engines/gpuaccel.c
 endif
+ifdef CONFIG_LIBMCFILE
+  SOURCE += engines/libmcfile.c
+  SOURCE += engines/libmcfile_async.c
+endif
 ifdef CONFIG_LINUX_SPLICE
   SOURCE += engines/splice.c
 endif
@@ -509,6 +513,14 @@ all: $(PROGS) $(T_TEST_PROGS) $(UT_PROGS) $(SCRIPTS) $(ENGS_OBJS) FORCE
 
 .PHONY: all install clean test
 .PHONY: FORCE cscope
+
+CXXFLAGS_ENGINE = $(filter-out -std=gnu99 -Wdeclaration-after-statement,$(CFLAGS)) $(CPPFLAGS)
+
+engines/libmcfile.o: engines/libmcfile.cc
+	$(CXX) $(CXXFLAGS_ENGINE) -c -o $@ $<
+
+engines/libmcfile_async.o: engines/libmcfile_async.cc
+	$(CXX) $(CXXFLAGS_ENGINE) -c -o $@ $<
 
 %.o : %.c
 	@mkdir -p $(dir $@)

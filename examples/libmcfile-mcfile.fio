@@ -1,0 +1,47 @@
+# Example libmcfile job, using mcfile I/O
+#
+# Required environment variables:
+#     GPU_DEV_IDS : refer to option 'gpu_dev_ids'
+#     FIO_DIR     : 'directory'. This job uses maca_io=mcfile, so path(s) must
+#                   point to GPUDirect Storage filesystem(s)
+#
+
+[global]
+ioengine=libmcfile
+directory=/tmp
+gpu_dev_ids=0
+maca_io=mcfile
+# 'direct' must be 1 when using maca_io=mcfile
+direct=1
+# Performance is negatively affected if 'bs' is not a multiple of 4k.
+# Refer to GDS mcFile documentation.
+bs=4K
+size=1M
+numjobs=1
+thread
+
+[read]
+stonewall
+rw=read
+
+[write]
+stonewall
+rw=write
+
+[randread]
+stonewall
+rw=randread
+
+[randwrite]
+stonewall
+rw=randwrite
+
+[verify]
+stonewall
+rw=write
+verify=md5
+
+[randverify]
+stonewall
+rw=randwrite
+verify=md5
