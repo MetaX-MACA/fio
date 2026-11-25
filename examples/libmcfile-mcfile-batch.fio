@@ -1,4 +1,4 @@
-# Example libmcfile_async job, using mcfile I/O
+# Example libmcfile_async batch job, using mcfile I/O
 #
 # Required environment variables:
 #     GPU_DEV_IDS : refer to option 'gpu_dev_ids'
@@ -9,8 +9,8 @@
 [global]
 ioengine=libmcfile_async
 api_type=batch
-iodepth=2
-iodepth_batch_submit=1
+iodepth=256
+iodepth_batch_submit=256
 directory=/tmp
 gpu_dev_ids=0
 maca_io=mcfile
@@ -24,7 +24,6 @@ numjobs=1
 thread
 
 [read]
-stonewall
 rw=read
 
 #[write]

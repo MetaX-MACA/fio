@@ -1,4 +1,4 @@
-# Example libmcfile job, using mcfile I/O
+# Example libmcfile sync job, using mcfile I/O
 #
 # Required environment variables:
 #     GPU_DEV_IDS : refer to option 'gpu_dev_ids'
@@ -21,27 +21,26 @@ numjobs=1
 thread
 
 [read]
-stonewall
 rw=read
 
-[write]
-stonewall
-rw=write
+#[write]
+#stonewall
+#rw=write
 
-[randread]
-stonewall
-rw=randread
+#[randread]
+#stonewall
+#rw=randread
 
-[randwrite]
-stonewall
-rw=randwrite
+#[randwrite]
+#stonewall
+#rw=randwrite
 
-[verify]
-stonewall
-rw=write
-verify=md5
+#[verify]
+#stonewall
+#rw=write
+#verify=md5
 
-[randverify]
-stonewall
-rw=randwrite
-verify=md5
+#[randverify]
+#stonewall
+#rw=randwrite
+#verify=md5

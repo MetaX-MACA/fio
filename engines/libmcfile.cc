@@ -47,8 +47,8 @@ extern "C" {
 #define GPU_ID_SEP ":"
 
 enum {
-	IO_MCFILE    = 1,
-	IO_POSIX     = 2
+	IO_MCFILE    = 0,
+	IO_POSIX     = 1
 };
 
 struct libmcfile_options {
@@ -109,16 +109,16 @@ static int running = 0;
 static int mcfile_initialized = 0;
 static pthread_mutex_t running_lock = PTHREAD_MUTEX_INITIALIZER;
 
-#define check_mcruntimecall(fn, rc)                                               \
-	do {                                                                        \
-		mcError_t res = fn;                                               \
-		if (res != mcSuccess) {                                           \
+#define check_mcruntimecall(fn, rc)                                   \
+	do {                                                              \
+		mcError_t res = fn;                                           \
+		if (res != mcSuccess) {                                       \
 			const char *str = mcGetErrorName(res);                    \
 			log_err("mc runtime api call failed %s:%d : err=%d:%s\n", \
-				#fn, __LINE__, res, str);                           \
-			rc = -1;                                                    \
-		} else                                                              \
-			rc = 0;                                                     \
+				#fn, __LINE__, res, str);                             \
+			rc = -1;                                                  \
+		} else                                                        \
+			rc = 0;                                                   \
 	} while(0)
 
 static const char *fio_libmcfile_get_mc_error(MCfileError_t st)
@@ -177,12 +177,25 @@ static int fio_libmcfile_init(struct thread_data *td)
 	int initialized;
 	int rc;
 
+	o->my_gpu_id = fio_libmcfile_find_gpu_id(td);
+	if (o->my_gpu_id < 0)
+		return 1;
+
+	dprint(FD_MEM, "Subjob %d uses GPU %d\n", td->subjob_number, o->my_gpu_id);
+	check_mcruntimecall(mcSetDevice(o->my_gpu_id), rc);
+	if (rc != 0)
+		return 1;
+
 	pthread_mutex_lock(&running_lock);
 	if (running == 0) {
 		assert(mcfile_initialized == 0);
 		if (o->maca_io == IO_MCFILE) {
 			/* only open the driver if this is the first worker thread */
+#ifdef CONFIG_MCFILE_MODE1
+			status = mcFileDriverOpen(1);
+#else
 			status = mcFileDriverOpen();
+#endif
 			if (status.err != MC_FILE_SUCCESS)
 				log_err("mcFileDriverOpen: err=%d:%s\n", status.err,
 					fio_libmcfile_get_mc_error(status));
@@ -195,15 +208,6 @@ static int fio_libmcfile_init(struct thread_data *td)
 	pthread_mutex_unlock(&running_lock);
 
 	if (o->maca_io == IO_MCFILE && !initialized)
-		return 1;
-
-	o->my_gpu_id = fio_libmcfile_find_gpu_id(td);
-	if (o->my_gpu_id < 0)
-		return 1;
-
-	dprint(FD_MEM, "Subjob %d uses GPU %d\n", td->subjob_number, o->my_gpu_id);
-	check_mcruntimecall(mcSetDevice(o->my_gpu_id), rc);
-	if (rc != 0)
 		return 1;
 
 	return 0;
@@ -224,9 +228,9 @@ static inline int fio_libmcfile_pre_write(struct thread_data *td,
 			  already be in GPU memory in a normal mcFile application.
 			*/
 			check_mcruntimecall(mcMemcpy(((char*) o->cu_mem_ptr) + gpu_offset,
-							 io_u->xfer_buf,
-							 io_u->xfer_buflen,
-							 mcMemcpyHostToDevice), rc);
+							    io_u->xfer_buf,
+							    io_u->xfer_buflen,
+							    mcMemcpyHostToDevice), rc);
 			if (rc != 0) {
 				log_err("DDIR_WRITE mcMemcpy H2D failed\n");
 				io_u->error = EIO;
@@ -242,9 +246,9 @@ static inline int fio_libmcfile_pre_write(struct thread_data *td,
 		  present in a POSIX I/O MACA application.
 		*/
 		check_mcruntimecall(mcMemcpy((char*) o->junk_buf + gpu_offset,
-						 ((char*) o->cu_mem_ptr) + gpu_offset,
-						 io_u->xfer_buflen,
-						 mcMemcpyDeviceToHost), rc);
+						    ((char*) o->cu_mem_ptr) + gpu_offset,
+						    io_u->xfer_buflen,
+						    mcMemcpyDeviceToHost), rc);
 		if (rc != 0) {
 			log_err("DDIR_WRITE mcMemcpy D2H failed\n");
 			io_u->error = EIO;
@@ -269,9 +273,9 @@ static inline int fio_libmcfile_post_read(struct thread_data *td,
 		if (td->o.verify) {
 			/* Copy GPU memory to CPU buffer for verify */
 			check_mcruntimecall(mcMemcpy(io_u->xfer_buf,
-							 ((char*) o->cu_mem_ptr) + gpu_offset,
-							 io_u->xfer_buflen,
-							 mcMemcpyDeviceToHost), rc);
+							    ((char*) o->cu_mem_ptr) + gpu_offset,
+							    io_u->xfer_buflen,
+							    mcMemcpyDeviceToHost), rc);
 			if (rc != 0) {
 				log_err("DDIR_READ mcMemcpy D2H failed\n");
 				io_u->error = EIO;
@@ -280,9 +284,9 @@ static inline int fio_libmcfile_post_read(struct thread_data *td,
 	} else if (o->maca_io == IO_POSIX) {
 		/* POSIX I/O read, copy the CPU buffer to GPU memory */
 		check_mcruntimecall(mcMemcpy(((char*) o->cu_mem_ptr) + gpu_offset,
-						 io_u->xfer_buf,
-						 io_u->xfer_buflen,
-						 mcMemcpyHostToDevice), rc);
+						    io_u->xfer_buf,
+						    io_u->xfer_buflen,
+						    mcMemcpyHostToDevice), rc);
 		if (rc != 0) {
 			log_err("DDIR_READ mcMemcpy H2D failed\n");
 			io_u->error = EIO;
@@ -340,7 +344,8 @@ static enum fio_q_status fio_libmcfile_queue(struct thread_data *td,
 		  that gpu_offset equals the the difference between io_u->xfer_buf and
 		  the page-aligned base address for io_u buffers.
 		*/
-		gpu_offset = io_u->index * io_u->xfer_buflen;
+		//gpu_offset = io_u->index * io_u->xfer_buflen;
+		gpu_offset = io_u->offset; // io_u->index is 0, use io_u->offset as io_offset
 		io_offset = io_u->offset;
 		remaining = io_u->xfer_buflen;
 
@@ -350,14 +355,12 @@ static enum fio_q_status fio_libmcfile_queue(struct thread_data *td,
 		assert(gpu_offset + io_u->xfer_buflen <= o->total_mem);
 
 		if (o->maca_io == IO_MCFILE) {
-			if (!(ALIGNED_4KB(io_u->xfer_buflen) ||
-			      (o->logged & LOGGED_BUFLEN_NOT_ALIGNED))) {
+			if (!(ALIGNED_4KB(io_u->xfer_buflen) || (o->logged & LOGGED_BUFLEN_NOT_ALIGNED))) {
 				log_err("buflen not 4KB-aligned: %llu\n", io_u->xfer_buflen);
 				o->logged |= LOGGED_BUFLEN_NOT_ALIGNED;
 			}
 
-			if (!(ALIGNED_4KB(gpu_offset) ||
-			      (o->logged & LOGGED_GPU_OFFSET_NOT_ALIGNED))) {
+			if (!(ALIGNED_4KB(gpu_offset) || (o->logged & LOGGED_GPU_OFFSET_NOT_ALIGNED))) {
 				log_err("gpu_offset not 4KB-aligned: %lu\n", gpu_offset);
 				o->logged |= LOGGED_GPU_OFFSET_NOT_ALIGNED;
 			}
@@ -374,18 +377,18 @@ static enum fio_q_status fio_libmcfile_queue(struct thread_data *td,
 			if (io_u->ddir == DDIR_READ) {
 				if (o->maca_io == IO_MCFILE) {
 					sz = mcFileRead(fcd->cf_handle, o->cu_mem_ptr, remaining,
-							io_offset + xfered, gpu_offset + xfered);
+							        io_offset + xfered, gpu_offset + xfered);
 					if (sz == -1) {
 						io_u->error = errno;
 						log_err("mcFileRead: err=%d\n", errno);
 					} else if (sz < 0) {
 						io_u->error = EIO;
 						log_err("mcFileRead: err=%ld:%s\n", sz,
-							mcfileop_status_error(MCfileOpError(-sz)));
+							    mcfileop_status_error(MCfileOpError(-sz)));
 					}
 				} else if (o->maca_io == IO_POSIX) {
 					sz = pread(io_u->file->fd, ((char*) io_u->xfer_buf) + xfered,
-						   remaining, io_offset + xfered);
+						       remaining, io_offset + xfered);
 					if (sz < 0) {
 						io_u->error = errno;
 						log_err("pread: err=%d\n", errno);
@@ -398,19 +401,18 @@ static enum fio_q_status fio_libmcfile_queue(struct thread_data *td,
 			} else if (io_u->ddir == DDIR_WRITE) {
 				if (o->maca_io == IO_MCFILE) {
 					sz = mcFileWrite(fcd->cf_handle, o->cu_mem_ptr, remaining,
-							 io_offset + xfered, gpu_offset + xfered);
+							         io_offset + xfered, gpu_offset + xfered);
 					if (sz == -1) {
 						io_u->error = errno;
 						log_err("mcFileWrite: err=%d\n", errno);
 					} else if (sz < 0) {
 						io_u->error = EIO;
 						log_err("mcFileWrite: err=%ld:%s\n", sz,
-							mcfileop_status_error(MCfileOpError(-sz)));
+							    mcfileop_status_error(MCfileOpError(-sz)));
 					}
 				} else if (o->maca_io == IO_POSIX) {
-					sz = pwrite(io_u->file->fd,
-						    ((char*) io_u->xfer_buf) + xfered,
-						    remaining, io_offset + xfered);
+					sz = pwrite(io_u->file->fd, ((char*) io_u->xfer_buf) + xfered,
+						        remaining, io_offset + xfered);
 					if (sz < 0) {
 						io_u->error = errno;
 						log_err("pwrite: err=%d\n", errno);
@@ -435,7 +437,7 @@ static enum fio_q_status fio_libmcfile_queue(struct thread_data *td,
 
 			if (remaining != 0)
 				log_info("Incomplete %s: %ld bytes remaining\n",
-					 io_u->ddir == DDIR_READ? "read" : "write", remaining);
+					     io_u->ddir == DDIR_READ? "read" : "write", remaining);
 		}
 
 		if (io_u->error != 0)
@@ -481,7 +483,7 @@ static int fio_libmcfile_open_file(struct thread_data *td, struct fio_file *f)
 		status = mcFileHandleRegister(&fcd->cf_handle, &fcd->cf_descr);
 		if (status.err != MC_FILE_SUCCESS) {
 			log_err("mcfile register: err=%d:%s\n", status.err,
-				fio_libmcfile_get_mc_error(status));
+				    fio_libmcfile_get_mc_error(status));
 			rc = EINVAL;
 			goto exit_err;
 		}
@@ -552,10 +554,15 @@ static int fio_libmcfile_iomem_alloc(struct thread_data *td, size_t total_mem)
 		goto exit_error;
 
 	if (o->maca_io == IO_MCFILE) {
+#ifdef CONFIG_MCFILE_MODE1
+		void *target_addr = NULL;
+		status = mcFileBufRegister(o->cu_mem_ptr, total_mem, 0, &target_addr);
+#else
 		status = mcFileBufRegister(o->cu_mem_ptr, total_mem, 0);
+#endif
 		if (status.err != MC_FILE_SUCCESS) {
 			log_err("mcFileBufRegister: err=%d:%s\n", status.err,
-				fio_libmcfile_get_mc_error(status));
+				    fio_libmcfile_get_mc_error(status));
 			goto exit_error;
 		}
 	}
@@ -588,7 +595,11 @@ static void fio_libmcfile_iomem_free(struct thread_data *td)
 	}
 	if (o->cu_mem_ptr) {
 		if (o->maca_io == IO_MCFILE)
+#ifdef CONFIG_MCFILE_MODE1
+			mcFileBufDeregister(o->cu_mem_ptr, o->total_mem);
+#else
 			mcFileBufDeregister(o->cu_mem_ptr);
+#endif
 		mcFree(o->cu_mem_ptr);
 		o->cu_mem_ptr = NULL;
 	}

@@ -64,8 +64,8 @@ extern "C" {
 #define GPU_ID_SEP ":"
 
 enum {
-	IO_MCFILE    = 1,
-	IO_POSIX     = 2
+	IO_MCFILE = 0,
+	IO_POSIX  = 1
 };
 
 enum {
@@ -75,14 +75,12 @@ enum {
 
 struct libmcfile_async_options {
 	struct thread_data *td;
-	char               *gpu_ids;       /* colon-separated list of GPU ids,
-					      one per job */
-	void               *dev_mem_ptr;    /* GPU memory */
+	char               *gpu_ids;       /* colon-separated list of GPU ids, one per job */
+	void               *cu_mem_ptr;    /* GPU memory */
 	int                 my_gpu_id;     /* GPU id to use for this job */
-    unsigned int        maca_io;            /* Type of I/O to use with MACA */
-	size_t              total_mem;     /* size for dev_mem_ptr */
-	int                 logged;        /* bitmask of log messages that have
-					      been output, prevent flood */
+    unsigned int        maca_io;       /* Type of I/O to use with MACA */
+	size_t              total_mem;     /* size for cu_mem_ptr */
+	int                 logged;        /* bitmask of log messages that have been output, prevent flood */
 	unsigned int        api;           /* selected mcFile API path */
 };
 
@@ -97,20 +95,20 @@ struct fio_libmcfile_async_data {
  * remain valid until the operation completes.
  */
 enum async_slot_state {
-	ASYNC_SLOT_FREE = 0,   /* available for reuse */
-	ASYNC_SLOT_QUEUED,    /* prepared by queue(), not yet submitted */
-	ASYNC_SLOT_IN_FLIGHT, /* submitted, awaiting completion */
+	ASYNC_SLOT_FREE = 0,    /* available for reuse */
+	ASYNC_SLOT_QUEUED,      /* prepared by queue(), not yet submitted */
+	ASYNC_SLOT_IN_FLIGHT    /* submitted, awaiting completion */
 };
 
 struct libmcfile_async_slot {
-	size_t   size;
-	off_t    file_offset;
-	off_t    buf_offset;      /* always 0 (mcFile bug workaround) */
-	size_t   gpu_offset;      /* actual GPU memory offset, baked into devPtr_base */
-	ssize_t  bytes_done;
-	int      opcode;          /* MCFILE_READ or MCFILE_WRITE */
-	int      state;
-	struct io_u *io_u;        /* owning io_u, NULL when ASYNC_SLOT_FREE */
+	size_t       size;
+	off_t        file_offset;
+	off_t        buf_offset;     /* always 0 (mcFile bug workaround) */
+	size_t       gpu_offset;     /* actual GPU memory offset, baked into devPtr_base */
+	ssize_t      bytes_done;
+	int          opcode;         /* MCFILE_READ or MCFILE_WRITE */
+	int          state;
+	struct io_u *io_u;           /* owning io_u, NULL when ASYNC_SLOT_FREE */
 };
 
 /*
@@ -138,24 +136,24 @@ struct libmcfile_async_slot {
  *   in_flight        - number of slots in ASYNC_SLOT_IN_FLIGHT state
  */
 struct libmcfile_async_data {
-	unsigned int        api;
-	unsigned int        entries;
+	unsigned int                 api;
+	unsigned int                 entries;
 
 	/* batch path */
-	MCfileBatchHandle_t batch_handle;
-	MCfileIOParams_t   *io_params;
-	MCfileIOEvents_t   *io_events;
-	unsigned int        queued;
-	unsigned int        in_flight;
+	MCfileBatchHandle_t          batch_handle;
+	MCfileIOParams_t            *io_params;
+	MCfileIOEvents_t            *io_events;
+	unsigned int                 queued;
+	unsigned int                 in_flight;
 
 	/* async stream path */
-	mcStream_t stream;           /* single shared MACA stream per thread */
+	mcStream_t stream;
 	struct libmcfile_async_slot *slots;
-	unsigned int       *pending_slots;
-	unsigned int        pending_nr;
-	unsigned int       *completed_slots;
-	unsigned int        completed_nr;
-	unsigned int        completed_head;
+	unsigned int                *pending_slots;
+	unsigned int                 pending_nr;
+	unsigned int                *completed_slots;
+	unsigned int                 completed_nr;
+	unsigned int                 completed_head;
 };
 
 static struct fio_option options[] = {
@@ -215,16 +213,16 @@ static int running = 0;
 static int mcfile_initialized = 0;
 static pthread_mutex_t running_lock = PTHREAD_MUTEX_INITIALIZER;
 
-#define check_mcruntimecall(fn, rc)                                               \
-	do {                                                                        \
-		mcError_t res = fn;                                               \
-		if (res != mcSuccess) {                                           \
+#define check_mcruntimecall(fn, rc)                                   \
+	do {                                                              \
+		mcError_t res = fn;                                           \
+		if (res != mcSuccess) {                                       \
 			const char *str = mcGetErrorName(res);                    \
 			log_err("mc runtime api call failed %s:%d : err=%d:%s\n", \
-				#fn, __LINE__, res, str);                           \
-			rc = -1;                                                    \
-		} else                                                              \
-			rc = 0;                                                     \
+				#fn, __LINE__, res, str);                             \
+			rc = -1;                                                  \
+		} else                                                        \
+			rc = 0;                                                   \
 	} while(0)
 
 static const char *fio_libmcfile_async_get_mc_error(MCfileError_t st)
@@ -291,24 +289,6 @@ static int fio_libmcfile_async_init(struct thread_data *td)
 	MCfileError_t status;
 	int initialized;
 	int rc;
-	pthread_mutex_lock(&running_lock);
-	if (running == 0) {
-		assert(mcfile_initialized == 0);
-		/* only open the driver if this is the first worker thread */
-		status = mcFileDriverOpen();
-		if (status.err != MC_FILE_SUCCESS) {
-			log_err("mcFileDriverOpen: err=%d:%s\n", status.err,
-				fio_libmcfile_async_get_mc_error(status));
-		} else {
-			mcfile_initialized = 1;
-		}
-	}
-	running++;
-	initialized = mcfile_initialized;
-	pthread_mutex_unlock(&running_lock);
-
-	if (!initialized)
-		return 1;
 
 	o->my_gpu_id = fio_libmcfile_async_find_gpu_id(td);
 	if (o->my_gpu_id < 0)
@@ -317,6 +297,30 @@ static int fio_libmcfile_async_init(struct thread_data *td)
 	dprint(FD_MEM, "Subjob %d uses GPU %d\n", td->subjob_number, o->my_gpu_id);
 	check_mcruntimecall(mcSetDevice(o->my_gpu_id), rc);
 	if (rc != 0)
+		return 1;
+
+	pthread_mutex_lock(&running_lock);
+	if (running == 0) {
+		assert(mcfile_initialized == 0);
+		if (o->maca_io == IO_MCFILE) {
+			/* only open the driver if this is the first worker thread */
+#ifdef CONFIG_MCFILE_MODE1
+			status = mcFileDriverOpen(1);
+#else
+			status = mcFileDriverOpen();
+#endif
+			if (status.err != MC_FILE_SUCCESS)
+				log_err("mcFileDriverOpen: err=%d:%s\n", status.err,
+					    fio_libmcfile_async_get_mc_error(status));
+			else
+				mcfile_initialized = 1;
+		}
+	}
+	running++;
+	initialized = mcfile_initialized;
+	pthread_mutex_unlock(&running_lock);
+
+	if (o->maca_io == IO_MCFILE && !initialized)
 		return 1;
 
 	return 0;
@@ -336,13 +340,25 @@ static int fio_libmcfile_async_post_init(struct thread_data *td)
 			log_err("calloc failed for batch arrays: err=%d\n", errno);
 			return 1;
 		}
-
+#ifdef CONFIG_MCFILE_MODE1
+		mcfs_io_req_t * reqs = (mcfs_io_req_t *)calloc(ad->entries, sizeof(mcfs_io_req_t));
+		if (reqs == NULL) {
+			log_err("calloc failed for batch arrays: err=%d\n", errno);
+			return 1;
+		}
+		for (unsigned i = 0; i < ad->entries; ++i)
+		{
+			ad->io_params[i].u.reqs = reqs + i;
+		}
+#endif
+#ifndef CONFIG_MCFILE_MODE1
 		status = mcFileBatchIOSetUp(&ad->batch_handle, ad->entries);
 		if (status.err != MC_FILE_SUCCESS) {
 			log_err("mcFileBatchIOSetUp: err=%d:%s\n", status.err,
-				fio_libmcfile_async_get_mc_error(status));
+				    fio_libmcfile_async_get_mc_error(status));
 			return 1;
 		}
+#endif
 	} else {
 		/* async stream path: one shared MACA stream per thread */
 		ad->slots = (struct libmcfile_async_slot *)calloc(ad->entries, sizeof(*ad->slots));
@@ -354,9 +370,7 @@ static int fio_libmcfile_async_post_init(struct thread_data *td)
 			return 1;
 		}
 
-		check_mcruntimecall(
-			mcStreamCreateWithFlags(&ad->stream,
-						  mcStreamNonBlocking), rc);
+		check_mcruntimecall(mcStreamCreateWithFlags(&ad->stream, mcStreamNonBlocking), rc);
 		if (rc != 0) {
 			log_err("mcStreamCreateWithFlags failed\n");
 			return 1;
@@ -384,10 +398,10 @@ static inline int fio_libmcfile_async_pre_write(struct thread_data *td,
 		  This isn't done in the non-verify case because the data would
 		  already be in GPU memory in a normal mcFile application.
 		*/
-		check_mcruntimecall(mcMemcpy(((char*) o->dev_mem_ptr) + gpu_offset,
-						 io_u->xfer_buf,
-						 io_u->xfer_buflen,
-						 mcMemcpyHostToDevice), rc);
+		check_mcruntimecall(mcMemcpy(((char*) o->cu_mem_ptr) + gpu_offset,
+						    io_u->xfer_buf,
+						    io_u->xfer_buflen,
+						    mcMemcpyHostToDevice), rc);
 		if (rc != 0) {
 			log_err("DDIR_WRITE mcMemcpy H2D failed\n");
 			io_u->error = EIO;
@@ -407,9 +421,9 @@ static inline int fio_libmcfile_async_post_read(struct thread_data *td,
 	if (td->o.verify) {
 		/* Copy GPU memory to CPU buffer for verify */
 		check_mcruntimecall(mcMemcpy(io_u->xfer_buf,
-						 ((char*) o->dev_mem_ptr) + gpu_offset,
-						 io_u->xfer_buflen,
-						 mcMemcpyDeviceToHost), rc);
+						    ((char*) o->cu_mem_ptr) + gpu_offset,
+						    io_u->xfer_buflen,
+						    mcMemcpyDeviceToHost), rc);
 		if (rc != 0) {
 			log_err("DDIR_READ mcMemcpy D2H failed\n");
 			io_u->error = EIO;
@@ -467,7 +481,10 @@ static enum fio_q_status fio_libmcfile_async_queue_batch(struct thread_data *td,
 	MCfileIOParams_t *params;
 
 	if (ad->queued + ad->in_flight >= ad->entries)
+	{
+		ad->queued = 0; // getevents() is called after commit() is done even if queue is not full, as mcFileBatchIOGetStatus() should be called right after mcFileBatchIOSubmit()
 		return FIO_Q_BUSY;
+	}
 
 	gpu_offset = fio_libmcfile_async_gpu_offset(io_u);
 	assert(gpu_offset + io_u->xfer_buflen <= o->total_mem);
@@ -493,17 +510,25 @@ static enum fio_q_status fio_libmcfile_async_queue_batch(struct thread_data *td,
 	}
 
 	params = &ad->io_params[ad->queued];
+#ifdef CONFIG_MCFILE_MODE1
+	params->u.reqs->fd = fcd->cf_descr.handle.fd;
+	params->u.reqs->device_id = o->my_gpu_id;
+	params->u.reqs->buf = o->cu_mem_ptr;
+	params->u.reqs->buf_offset = io_u->offset; // gpu_offset is 0, use io_u->offset as f_offset
+	params->u.reqs->nbytes = io_u->xfer_buflen;
+	params->u.reqs->f_offset = io_u->offset;
+	params->u.reqs->result = -1;
+#else
 	params->mode = MCFILE_BATCH;
 	params->fh = fcd->cf_handle;
-	params->u.batch.devPtr_base = o->dev_mem_ptr;
+	params->u.batch.devPtr_base = o->cu_mem_ptr;
 	params->u.batch.file_offset = io_u->offset;
-	params->u.batch.devPtr_offset = gpu_offset;
+	params->u.batch.devPtr_offset = io_u->offset; // gpu_offset is 0, use io_u->offset as f_offset?
 	params->u.batch.size = io_u->xfer_buflen;
+#endif
 	params->opcode = (io_u->ddir == DDIR_READ) ? MCFILE_READ : MCFILE_WRITE;
 	params->cookie = io_u;
-
 	ad->queued++;
-	log_info("fio_libmcfile_async_queue_batch(): ad->queued %u\n", ad->queued);
 	return FIO_Q_QUEUED;
 }
 
@@ -538,11 +563,19 @@ static int fio_libmcfile_async_commit_batch(struct thread_data *td)
 
 	if (!ad->queued)
 		return 0;
-    log_info("fio_libmcfile_async_commit_batch(): ad->batch_handle %p, ad->queued %u, ad->in_flight %u, ad->io_params %p\n", ad->batch_handle, ad->queued, ad->in_flight, ad->io_params);
+#ifdef CONFIG_MCFILE_MODE1
+		status = mcFileBatchIOSetUp(&ad->batch_handle, 0);
+		if (status.err != MC_FILE_SUCCESS) {
+			log_err("mcFileBatchIOSetUp: err=%d:%s\n", status.err,
+				    fio_libmcfile_async_get_mc_error(status));
+			td_verror(td, EIO, "mcFileBatchIOSetUp");
+			return -EIO;
+		}
+#endif
 	status = mcFileBatchIOSubmit(ad->batch_handle, ad->queued, ad->io_params, 0);
 	if (status.err != MC_FILE_SUCCESS) {
 		log_err("mcFileBatchIOSubmit: err=%d:%s\n", status.err,
-			fio_libmcfile_async_get_mc_error(status));
+			    fio_libmcfile_async_get_mc_error(status));
 		td_verror(td, EIO, "mcFileBatchIOSubmit");
 		return -EIO;
 	}
@@ -553,9 +586,7 @@ static int fio_libmcfile_async_commit_batch(struct thread_data *td)
 	fio_libmcfile_async_queued(td, io_us, ad->queued);
 	io_u_mark_submit(td, ad->queued);
 
-	ad->in_flight += ad->queued;
-	ad->queued = 0;
-	log_info("fio_libmcfile_async_commit_batch(): ad->in_flight %u ad->queued %u\n", ad->in_flight, ad->queued);
+	ad->in_flight = ad->queued;
 
 	return 0;
 }
@@ -565,7 +596,7 @@ static int fio_libmcfile_async_getevents_batch(struct thread_data *td,
 					       const struct timespec *t)
 {
 	struct libmcfile_async_data *ad = (struct libmcfile_async_data *)td->io_ops_data;
-	unsigned int actual_min = td->o.iodepth_batch_complete_min == 0 ? 0 : min;
+	unsigned int actual_min = td->o.iodepth_batch_complete_min == 0 ? 0 : ad->in_flight;
 	MCfileError_t status;
 	unsigned int nr;
 	unsigned int events = 0;
@@ -575,13 +606,13 @@ static int fio_libmcfile_async_getevents_batch(struct thread_data *td,
 
 	do {
 		nr = max - events;
-		log_info("fio_libmcfile_async_getevents_batch(): mcFileBatchIOGetStatus() nr %u actual_min %u\n", nr, actual_min);
+		int err;
 		status = mcFileBatchIOGetStatus(ad->batch_handle, actual_min,
 						&nr, ad->io_events + events,
-						(struct timespec *) t);
+						(struct timespec *) t, &err);
 		if (status.err != MC_FILE_SUCCESS) {
 			log_err("mcFileBatchIOGetStatus: err=%d:%s\n", status.err,
-				fio_libmcfile_async_get_mc_error(status));
+				    fio_libmcfile_async_get_mc_error(status));
 			td_verror(td, EIO, "mcFileBatchIOGetStatus");
 			return -EIO;
 		}
@@ -622,10 +653,21 @@ static struct io_u *fio_libmcfile_async_event_batch(struct thread_data *td,
 	struct io_u *io_u;
 	size_t gpu_offset;
 
+#ifdef CONFIG_MCFILE_MODE1
 	params = &ad->io_params[event];
 	io_u = (struct io_u *) params->cookie;
+    if (params->u.reqs->result < 0) {
+		io_u->error = EIO;
+		log_err("mcFile batch IO failed: ret=%zd\n", params->u.reqs->result);
+	}
+	else if (params->u.reqs->result != io_u->xfer_buflen) {
+		io_u->resid = io_u->xfer_buflen - params->u.reqs->result;
+	} else {
+		io_u->error = 0;
+	}
+#else
 	events = &ad->io_events[event];
-
+	io_u = (struct io_u *) events->cookie;
 	if (events->status != MCFILE_COMPLETE) {
 		io_u->error = EIO;
 		log_err("mcFile batch IO not complete: status=0x%x\n", events->status);
@@ -637,7 +679,7 @@ static struct io_u *fio_libmcfile_async_event_batch(struct thread_data *td,
 	} else {
 		io_u->error = 0;
 	}
-
+#endif
 	if (io_u->ddir == DDIR_READ && io_u->error == 0) {
 		gpu_offset = fio_libmcfile_async_gpu_offset(io_u);
 		fio_libmcfile_async_post_read(td, o, io_u, gpu_offset);
@@ -674,14 +716,12 @@ static enum fio_q_status fio_libmcfile_async_queue_async(struct thread_data *td,
 
 	assert(gpu_offset + io_u->xfer_buflen <= o->total_mem);
 
-	if (!(ALIGNED_4KB(io_u->xfer_buflen) ||
-	      (o->logged & LOGGED_BUFLEN_NOT_ALIGNED))) {
+	if (!(ALIGNED_4KB(io_u->xfer_buflen) || (o->logged & LOGGED_BUFLEN_NOT_ALIGNED))) {
 		log_err("buflen not 4KB-aligned: %llu\n", io_u->xfer_buflen);
 		o->logged |= LOGGED_BUFLEN_NOT_ALIGNED;
 	}
 
-	if (!(ALIGNED_4KB(gpu_offset) ||
-	      (o->logged & LOGGED_GPU_OFFSET_NOT_ALIGNED))) {
+	if (!(ALIGNED_4KB(gpu_offset) || (o->logged & LOGGED_GPU_OFFSET_NOT_ALIGNED))) {
 		log_err("gpu_offset not 4KB-aligned: %lu\n", gpu_offset);
 		o->logged |= LOGGED_GPU_OFFSET_NOT_ALIGNED;
 	}
@@ -733,27 +773,27 @@ static int fio_libmcfile_async_commit_async(struct thread_data *td)
 		 */
 		if (slot->opcode == MCFILE_READ) {
 			status = mcFileReadAsync(fcd->cf_handle,
-						 o->dev_mem_ptr + slot->gpu_offset,
-						 &slot->size,
-						 &slot->file_offset,
-						 &slot->buf_offset,
-						 &slot->bytes_done,
-						 ad->stream);
+						             o->cu_mem_ptr + slot->gpu_offset,
+						             &slot->size,
+						             &slot->file_offset,
+						             &slot->buf_offset,
+						             &slot->bytes_done,
+						             ad->stream);
 		} else {
 			status = mcFileWriteAsync(fcd->cf_handle,
-						  o->dev_mem_ptr + slot->gpu_offset,
-						  &slot->size,
-						  &slot->file_offset,
-						  &slot->buf_offset,
-						  &slot->bytes_done,
-						  ad->stream);
+						              o->cu_mem_ptr + slot->gpu_offset,
+						              &slot->size,
+						              &slot->file_offset,
+						              &slot->buf_offset,
+						              &slot->bytes_done,
+						              ad->stream);
 		}
 
 		if (status.err != MC_FILE_SUCCESS) {
 			log_err("mcFile%sAsync: err=%d:%s\n",
-				slot->opcode == MCFILE_READ ? "Read" : "Write",
-				status.err,
-				fio_libmcfile_async_get_mc_error(status));
+				    slot->opcode == MCFILE_READ ? "Read" : "Write",
+				    status.err,
+				    fio_libmcfile_async_get_mc_error(status));
 			io_u->error = EIO;
 			td_verror(td, EIO, "mcFileAsync");
 			slot->state = ASYNC_SLOT_FREE;
@@ -801,10 +841,8 @@ static int fio_libmcfile_async_getevents_async(struct thread_data *td,
 			return 0;
 	} else {
 		mcError_t cres = mcStreamSynchronize(ad->stream);
-		if (cres != mcSuccess) {
-			log_err("mcStreamSynchronize failed: %s\n",
-				mcGetErrorName(cres));
-		}
+		if (cres != mcSuccess)
+			log_err("mcStreamSynchronize failed: %s\n", mcGetErrorName(cres));
 	}
 
 	/* All in-flight IOs on the shared stream are now complete */
@@ -834,8 +872,7 @@ static struct io_u *fio_libmcfile_async_event_async(struct thread_data *td,
 
 	if (slot->bytes_done < 0) {
 		io_u->error = EIO;
-		log_err("mcFile async IO failed: bytes_done=%zd\n",
-			slot->bytes_done);
+		log_err("mcFile async IO failed: bytes_done=%zd\n", slot->bytes_done);
 	} else if ((size_t) slot->bytes_done != io_u->xfer_buflen) {
 		io_u->resid = io_u->xfer_buflen - slot->bytes_done;
 	} else {
@@ -935,7 +972,7 @@ static int fio_libmcfile_async_open_file(struct thread_data *td, struct fio_file
 	status = mcFileHandleRegister(&fcd->cf_handle, &fcd->cf_descr);
 	if (status.err != MC_FILE_SUCCESS) {
 		log_err("mcfile register: err=%d:%s\n", status.err,
-			fio_libmcfile_async_get_mc_error(status));
+			    fio_libmcfile_async_get_mc_error(status));
 		rc = EINVAL;
 		goto exit_err;
 	}
@@ -975,7 +1012,7 @@ static int fio_libmcfile_async_iomem_alloc(struct thread_data *td, size_t total_
 
 	o->total_mem = total_mem;
 	o->logged = 0;
-	o->dev_mem_ptr = NULL;
+	o->cu_mem_ptr = NULL;
 	td->orig_buffer = (char *)calloc(1, total_mem);
 	if (!td->orig_buffer) {
 		log_err("orig_buffer calloc failed: err=%d\n", errno);
@@ -984,18 +1021,24 @@ static int fio_libmcfile_async_iomem_alloc(struct thread_data *td, size_t total_
 
 	dprint(FD_MEM, "Alloc %zu for GPU %d\n", total_mem, o->my_gpu_id);
 
-	check_mcruntimecall(mcMalloc(&o->dev_mem_ptr, total_mem), rc);
+	check_mcruntimecall(mcMalloc(&o->cu_mem_ptr, total_mem), rc);
 	if (rc != 0)
 		goto exit_error;
-	check_mcruntimecall(mcMemset(o->dev_mem_ptr, 0xab, total_mem), rc);
+	check_mcruntimecall(mcMemset(o->cu_mem_ptr, 0xab, total_mem), rc);
 	if (rc != 0)
 		goto exit_error;
-
-	status = mcFileBufRegister(o->dev_mem_ptr, total_mem, 0);
-	if (status.err != MC_FILE_SUCCESS) {
-		log_err("mcFileBufRegister: err=%d:%s\n", status.err,
-			fio_libmcfile_async_get_mc_error(status));
-		goto exit_error;
+	if (o->maca_io == IO_MCFILE) {
+#ifdef CONFIG_MCFILE_MODE1
+		void *target_addr = NULL;
+		status = mcFileBufRegister(o->cu_mem_ptr, total_mem, 0, &target_addr);
+#else
+		status = mcFileBufRegister(o->cu_mem_ptr, total_mem, 0);
+#endif
+		if (status.err != MC_FILE_SUCCESS) {
+			log_err("mcFileBufRegister: err=%d:%s\n", status.err,
+				    fio_libmcfile_async_get_mc_error(status));
+			goto exit_error;
+		}
 	}
 
 	return 0;
@@ -1005,9 +1048,9 @@ exit_error:
 		free(td->orig_buffer);
 		td->orig_buffer = NULL;
 	}
-	if (o->dev_mem_ptr) {
-		mcFree(o->dev_mem_ptr);
-		o->dev_mem_ptr = NULL;
+	if (o->cu_mem_ptr) {
+		mcFree(o->cu_mem_ptr);
+		o->cu_mem_ptr = NULL;
 	}
 	return 1;
 }
@@ -1016,10 +1059,15 @@ static void fio_libmcfile_async_iomem_free(struct thread_data *td)
 {
 	struct libmcfile_async_options *o = (struct libmcfile_async_options *)td->eo;
 
-	if (o->dev_mem_ptr) {
-		mcFileBufDeregister(o->dev_mem_ptr);
-		mcFree(o->dev_mem_ptr);
-		o->dev_mem_ptr = NULL;
+	if (o->cu_mem_ptr) {
+		if (o->maca_io == IO_MCFILE)
+#ifdef CONFIG_MCFILE_MODE1
+			mcFileBufDeregister(o->cu_mem_ptr, o->total_mem);
+#else
+			mcFileBufDeregister(o->cu_mem_ptr);
+#endif
+		mcFree(o->cu_mem_ptr);
+		o->cu_mem_ptr = NULL;
 	}
 	if (td->orig_buffer) {
 		free(td->orig_buffer);
@@ -1033,8 +1081,12 @@ static void fio_libmcfile_async_cleanup(struct thread_data *td)
 
 	if (ad) {
 		if (ad->api == MCFILE_API_BATCH) {
+#ifdef CONFIG_MCFILE_MODE1
+			free(ad->io_params[0].u.reqs);
+#else
 			if (ad->batch_handle)
 				mcFileBatchIODestroy(ad->batch_handle);
+#endif
 			free(ad->io_params);
 			free(ad->io_events);
 		} else {
@@ -1047,7 +1099,6 @@ static void fio_libmcfile_async_cleanup(struct thread_data *td)
 		free(ad);
 		td->io_ops_data = NULL;
 	}
-
 	pthread_mutex_lock(&running_lock);
 	running--;
 	assert(running >= 0);
